@@ -1,0 +1,923 @@
+import os
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import StandardScaler # for feature engineering.
+from sklearn.cluster import KMeans
+from sklearn.model_selection import train_test_split # for splitting the data.
+from sklearn.ensemble import RandomForestClassifier
+# from xgboost import XGBClassifier
+from sklearn.linear_model import LogisticRegression
+# from xgboost import XGBClassifier
+from sklearn.metrics import classification_report, accuracy_score
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+from sklearn.experimental import enable_hist_gradient_boosting  # noqa
+from sklearn.ensemble import HistGradientBoostingClassifier
+
+from sklearn.multioutput import MultiOutputClassifier
+
+from sklearn.metrics.pairwise import cosine_similarity # for Recommendation System.
+
+
+import matplotlib.pyplot as plt
+
+import joblib
+
+from google.colab import files  # for downloading model and selected_features pickle files.
+
+!pip install scikit-learn==1.6.1
+# !pip install --upgrade xgboost
+!pip install scikit-surprise
+
+
+# mention the feaures that a dataset should contain for each of your's project in github and doc.
+
+# STEP-1(Data Gathering):
+
+current_dir=os.getcwd()
+# content folder
+print(current_dir)
+dataset_path=os.path.join(current_dir,'sample_data','StudentPerformanceFactors.csv')
+# content->sample_data->student.csv
+print(dataset_path)
+data = pd.read_csv(dataset_path)
+print(data)
+
+# STEP-2(Data Preprocessing):
+
+excluded_columns = ["Parental_Education_Level", "Gender","Distance_from_Home"]
+
+# Remove the specified columns
+data = data.drop(columns=excluded_columns, errors='ignore')  # Use 'errors=ignore' to skip columns not in the dataset
+
+''' Filling Missing Values/Correct Inconsistent Data '''
+
+# Fill all numerical columns with their mean
+numerical_columns = data.select_dtypes(include=['int64', 'float64']).columns
+for column in numerical_columns:
+    data[column] = data[column].fillna(data[column].mean())
+    print(data[column])
+
+
+# Fill all categorical columns with their mode
+categorical_columns = data.select_dtypes(include=['object']).columns
+for column in categorical_columns:
+    data[column] = data[column].fillna(data[column].mode()[0])
+data['Peer_Influence']
+# Check again
+print("Missing Values After Filling:")
+print(data.isnull().sum())
+
+
+
+# A. Encoding Categorical Values:
+
+# Encoding Categorical Values: Update to handle all categorical inputs properly
+from sklearn.preprocessing import LabelEncoder
+
+# Encode binary categorical features (e.g., Yes/No or Public/Private)
+binary_columns = ['Extracurricular_Activities', 'Internet_Access', 'Learning_Disabilities', 'School_Type']  # Update with your binary columns
+binary_mapping = {'yes': 1, 'no': 0, 'private': 0, 'public': 1}
+
+for column in binary_columns:
+    if column in data.columns:
+        data[column] = data[column].str.lower().str.strip()  # Clean data
+        data[column] = data[column].map(binary_mapping)
+
+# Encode ordinal categorical features (e.g., Low, Medium, High)
+ordinal_columns = ['Parental_Involvement', 'Access_to_Resources', 'Motivation_Level', 'Family_Income', 'Teacher_Quality']  # Update as needed
+ordinal_mapping = {'low': 1, 'medium': 2, 'high': 3}
+
+for column in ordinal_columns:
+    if column in data.columns:
+        data[column] = data[column].str.lower().str.strip()  # Clean data
+        data[column] = data[column].map(ordinal_mapping)
+
+# One-hot encode nominal categorical features
+nominal_columns = ['Peer_Influence']  # Update with your nominal columns
+data = pd.get_dummies(data, columns=nominal_columns, prefix=nominal_columns, drop_first=True)
+
+
+# Convert columns to numeric types
+# Convert boolean columns to integers
+data['Peer_Influence_Neutral'] = data['Peer_Influence_Neutral'].astype(int)
+data['Peer_Influence_Positive'] = data['Peer_Influence_Positive'].astype(int)
+
+
+
+# Ensure all remaining object-type columns are label-encoded (if any)
+label_encoder = LabelEncoder()
+categorical_columns = data.select_dtypes(include=['object']).columns
+
+for column in categorical_columns:
+    data[column] = label_encoder.fit_transform(data[column])
+
+
+# Check the updated dataset structure
+print("Dataset after Encoding Categorical Values:")
+print(data.head())
+# print(type(data['Parental_Education_Level'][0]))
+
+
+# B. Correct Inconsistent Data:
+
+'''
+# Convert all string columns to lowercase and strip whitespace
+string_columns = data.select_dtypes(include=['object']).columns
+for column in string_columns:
+    data[column] = data[column].str.lower().str.strip()
+
+# Standardize categorical values for specific columns
+# For example: "yes", "no" variations
+standardization_map = {
+    "yes": ["yes", "y", "1"],
+    "no": ["no", "n", "0"]
+}
+
+# Replace variations with standardized values
+for key, variations in standardization_map.items():
+    for column in string_columns:
+        data[column] = data[column].replace(variations, key)
+'''
+# Convert numeric columns stored as strings to float
+for column in numerical_columns:
+    if data[column].dtype == 'object':
+        data[column] = pd.to_numeric(data[column], errors='coerce')
+
+# Verify the cleaned data
+print("Data after correcting inconsistencies:")
+print(data.head())
+
+
+# C. Feature Engineering:
+
+# Create a copy of the data for feature engineering
+engineered_data = data.copy()
+
+# Feature 1: Binary Feature for Regular Attendance
+if 'Attendance' in engineered_data.columns:
+    engineered_data['Is_Regular'] = engineered_data['Attendance'].apply(
+        lambda x: 1 if x >= 75 else 0  # Binary distinction for attendance
+    )
+
+# Feature 2: Normalize all numerical features
+numerical_columns = engineered_data.select_dtypes(include=['int64', 'float64']).columns
+scaler = StandardScaler()
+engineered_data[numerical_columns] = scaler.fit_transform(engineered_data[numerical_columns])
+
+# Feature 3: Interaction Feature: Attendance and Study Hours
+
+''' we got an 'Outlier Error' at this column(Attendance_Study_Ratio) '''
+
+if {'Attendance', 'Hours_Studied'}.issubset(engineered_data.columns):
+    # Calculate Attendance_Study_Ratio
+    engineered_data['Attendance_Study_Ratio'] = engineered_data['Attendance'] / (
+        engineered_data['Hours_Studied'] + 1e-5  # Avoid division by zero
+    )
+
+    # Identify outlier thresholds
+    lower_bound = engineered_data['Attendance_Study_Ratio'].quantile(0.01)  # 1st percentile
+    upper_bound = engineered_data['Attendance_Study_Ratio'].quantile(0.99)  # 99th percentile
+
+    # Cap the outliers
+    engineered_data['Attendance_Study_Ratio'] = engineered_data['Attendance_Study_Ratio'].clip(lower=lower_bound, upper=upper_bound)
+
+    # Optionally apply a log transformation to stabilize the range
+    engineered_data['Attendance_Study_Ratio'] = np.log1p(engineered_data['Attendance_Study_Ratio'].abs()) * np.sign(engineered_data['Attendance_Study_Ratio'])
+
+'''
+# Verify the column statistics
+engineered_data['Attendance_Study_Ratio'].describe()
+'''
+
+# Feature 4: Polynomial Feature: Hours Studied Squared
+if 'Hours_Studied' in engineered_data.columns:
+    engineered_data['Hours_Studied_Squared'] = engineered_data['Hours_Studied'] ** 2
+
+# Feature 5: Combine Features into an Index
+if {'Peer_Influence_Positive', 'Parental_Involvement'}.issubset(engineered_data.columns):
+    engineered_data['Combined_Score'] = (
+        engineered_data['Peer_Influence_Positive'] + engineered_data['Parental_Involvement']
+    ) / 2  # Average of the scores
+
+# Feature 6: Add Sleep Quality Feature (if Sleep_Hours is available)
+# Debug Sleep_Quality transformation
+def debug_sleep_quality(x):
+    try:
+        return 0 if x < 6 else (0.5 if 6 <= x <= 8 else 1)
+    except Exception as e:
+        print(f"Error for value: {x}, Error: {e}")
+        return None
+
+engineered_data['Sleep_Quality'] = engineered_data['Sleep_Hours'].apply(debug_sleep_quality)
+
+
+# Feature 7: Add a Performance Indicator
+if {'Previous_Scores', 'Hours_Studied'}.issubset(engineered_data.columns):
+    engineered_data['Performance_Indicator'] = (
+        engineered_data['Previous_Scores'] * engineered_data['Hours_Studied']
+    )
+
+# Verify the engineered data
+# import ace_tools as tools; tools.display_dataframe_to_user(name="Feature Engineered Dataset", dataframe=engineered_data)
+
+# Save the engineered dataset
+engineered_dataset_path = os.path.join(os.getcwd(), 'feature_engineered_data.csv')
+engineered_data.to_csv(engineered_dataset_path, index=False)
+
+print(f"Feature-engineered dataset saved to: {engineered_dataset_path}")
+
+
+# D. Creating Outputs Features/Target Variables:
+
+# 1. Early Dropout Risk Prediction(o/p - 1):
+
+# Create a copy of the engineered dataset
+engineered_data_with_dropout_risk = engineered_data.copy()
+
+# Define dropout risk logic based on the refined thresholds
+def calculate_dropout_risk(row):
+    if (row['Attendance'] < -0.86) or \
+       (row['Hours_Studied'] < -0.66) or \
+       (row['Motivation_Level'] < -1.3) or \
+       (row['Attendance_Study_Ratio'] < -1.15) or \
+       (row['Performance_Indicator'] < -0.42):
+        return 1  # High risk of dropout
+    elif (row['Attendance'] < 0.002) or \
+         (row['Hours_Studied'] < 0.004) or \
+         (row['Motivation_Level'] < 0.134):
+        return 0.5  # Medium risk
+    else:
+        return 0  # Low risk
+
+# Apply the logic to create the new feature
+engineered_data_with_dropout_risk['Early_Dropout_Risk'] = engineered_data_with_dropout_risk.apply(calculate_dropout_risk, axis=1)
+
+# Save the updated dataset
+# dropout_risk_dataset_path = '/mnt/data/feature_engineered_with_dropout_risk.csv'
+
+dropout_risk_dataset_path = os.path.join(os.getcwd(), 'feature_engineered_with_dropout_risk.csv')
+engineered_data_with_dropout_risk.to_csv(dropout_risk_dataset_path, index=False)
+
+print(f"Dataset with 'Early Dropout Risk' saved to: {dropout_risk_dataset_path}")
+
+
+
+# 2. Skill Gap Analysis(o/p - 2):
+
+# Create a copy of the engineered dataset
+engineered_data_with_skill_gap = engineered_data_with_dropout_risk.copy()
+
+# Define skill gap analysis logic
+# Define logic for Skill Gap Analysis
+def calculate_skill_gap(row):
+    if (row['Exam_Score'] < row['Previous_Scores'] - 1) and (row['Hours_Studied'] > 0):
+        return "Significant Gap"
+    elif (row['Exam_Score'] < row['Previous_Scores']) and (row['Hours_Studied'] <= 0):
+        return "Moderate Gap"
+    else:
+        return "No Gap"
+
+# Apply the logic to create the new feature
+engineered_data_with_skill_gap['Skill_Gap_Analysis'] = engineered_data_with_skill_gap.apply(calculate_skill_gap, axis=1)
+
+# Save the updated dataset
+skill_gap_dataset_path = os.path.join(os.getcwd(), 'feature_engineered_with_skill_gap.csv')
+engineered_data_with_skill_gap.to_csv(skill_gap_dataset_path, index=False)
+
+print(f"Dataset with 'Skill Gap Analysis' saved to: {skill_gap_dataset_path}")
+
+
+
+# 3. Optimal Study Group Formation(o/p - 3):
+
+# Create a copy of the dataset for clustering
+engineered_data_for_clustering = engineered_data_with_skill_gap.copy()
+
+# Select features for clustering
+clustering_features = ['Previous_Scores', 'Motivation_Level', 'Peer_Influence_positive', 'Hours_Studied']
+# Check if the column exists before selecting
+existing_features = [feature for feature in clustering_features if feature in engineered_data_for_clustering.columns]
+clustering_data = engineered_data_for_clustering[existing_features]
+
+# Standardize the data for clustering
+scaler = StandardScaler()
+clustering_data_scaled = scaler.fit_transform(clustering_data)
+
+# Determine the optimal number of clusters using the elbow method
+inertia = []
+k_values = range(1, 10)
+for k in k_values:
+    kmeans = KMeans(n_clusters=k, random_state=42)
+    kmeans.fit(clustering_data_scaled)
+    inertia.append(kmeans.inertia_)
+
+# Plot the elbow curve
+plt.figure(figsize=(8, 6))
+plt.plot(k_values, inertia, marker='o')
+plt.title('Elbow Method for Optimal Clusters')
+plt.xlabel('Number of Clusters (k)')
+plt.ylabel('Inertia')
+plt.grid(True)
+plt.show()
+
+# Fit KMeans with the chosen number of clusters (e.g., k=3 based on the elbow method)
+optimal_k = 3  # Replace this with the number of clusters determined from the elbow method
+kmeans = KMeans(n_clusters=optimal_k, random_state=42)
+engineered_data_for_clustering['Study_Group'] = kmeans.fit_predict(clustering_data_scaled)
+
+
+# Save the updated dataset
+study_group_dataset_path = os.path.join(os.getcwd(), 'feature_engineered_with_study_groups.csv')
+engineered_data_for_clustering.to_csv(study_group_dataset_path, index=False)
+
+print(f"Dataset with 'Optimal Study Groups' saved to: {study_group_dataset_path}")
+
+
+
+# 4. Mental Health and Engagement Prediction(o/p - 4):
+
+# Create a copy of the dataset for Mental Health and Engagement Prediction
+engineered_data_with_engagement = engineered_data_for_clustering.copy()
+
+# Define logic for Mental Health and Engagement Prediction
+def predict_engagement(row):
+    score = 0
+
+    # Assign scores based on conditions
+    if row['Motivation_Level'] < 0:  # Below average motivation
+        score += 2
+    if row['Attendance'] < 0:  # Below average attendance
+        score += 2
+    if row['Sleep_Hours'] < 0:  # Below average sleep hours
+        score += 1
+    if row['Internet_Access'] == 0:  # No internet access
+        score += 1
+    if row['Physical_Activity'] < 0:  # Below average physical activity
+        score += 1
+
+    # Classify risk levels
+    if score >= 5:
+        return "High Risk"
+    elif score >= 3:
+        return "Moderate Risk"
+    else:
+        return "Low Risk"
+
+# Apply the logic to create the new feature
+engineered_data_with_engagement['Engagement_Prediction'] = engineered_data_with_engagement.apply(predict_engagement, axis=1)
+
+
+# Save the updated dataset
+engagement_dataset_path = os.path.join(os.getcwd(), 'feature_engineered_with_engagement.csv')
+engineered_data_with_engagement.to_csv(engagement_dataset_path, index=False)
+
+print(f"Dataset with 'Mental Health and Engagement Prediction' saved to: {engagement_dataset_path}")
+
+
+# 5. Learning Path Recommendation(o/p - 5):
+
+# Create a copy of the dataset for Learning Path Recommendation
+engineered_data_with_learning_path = engineered_data_with_engagement.copy()
+
+'''
+# Define logic for Learning Path Recommendation
+def recommend_learning_path(row):
+    recommendations = {
+        "Courses": None,
+        "Study_Schedule": None,
+        "Resources": None
+    }
+
+    # Determine course recommendation
+    if row['Previous_Scores'] > 0.5 and row['Exam_Score'] > 0.5:
+        recommendations["Courses"] = "Advanced Courses"
+    elif row['Previous_Scores'] < 0 and row['Exam_Score'] < 0:
+        recommendations["Courses"] = "Foundational Courses"
+    else:
+        recommendations["Courses"] = "Intermediate Courses"
+
+    # Determine study schedule
+    if row['Hours_Studied'] < 0:
+        recommendations["Study_Schedule"] = "Intensive Schedule"
+    elif row['Hours_Studied'] < 0.5:
+        recommendations["Study_Schedule"] = "Regular Schedule"
+    else:
+        recommendations["Study_Schedule"] = "Light Schedule"
+
+    # Determine resources
+    if row['Motivation_Level'] < 0 or row['Exam_Score'] < 0:
+        recommendations["Resources"] = "Additional Tutoring and Online Resources"
+    elif row['Motivation_Level'] > 0.5 and row['Exam_Score'] > 0.5:
+        recommendations["Resources"] = "Study Groups and Peer Learning"
+    else:
+        recommendations["Resources"] = "Self-Study Materials"
+
+    return recommendations
+'''
+
+def recommend_learning_path(row):
+    recommendations = {
+        "Courses": None,
+        "Study_Schedule": None,
+        "Resources": None
+    }
+
+    # Adjusted thresholds for course recommendation
+    if row['Previous_Scores'] > 0 and row['Exam_Score'] > 4:  # Midpoint of Exam_Score range
+        recommendations["Courses"] = "Advanced Courses"
+    elif row['Previous_Scores'] < -1 and row['Exam_Score'] < 0:  # Lower range of Previous_Scores and Exam_Score
+        recommendations["Courses"] = "Foundational Courses"
+    else:
+        recommendations["Courses"] = "Intermediate Courses"
+
+    # Adjusted thresholds for study schedule
+    if row['Hours_Studied'] < 3.2:  # Slightly above the minimum value
+        recommendations["Study_Schedule"] = "Intensive Schedule"
+    elif row['Hours_Studied'] < 3.6:  # Midpoint of Hours_Studied range
+        recommendations["Study_Schedule"] = "Regular Schedule"
+    else:
+        recommendations["Study_Schedule"] = "Light Schedule"
+
+    # Adjusted thresholds for resources
+    if row['Motivation_Level'] < -0.5 or row['Exam_Score'] < 0:  # Low motivation or negative Exam_Score
+        recommendations["Resources"] = "Additional Tutoring and Online Resources"
+    elif row['Motivation_Level'] > 0.5 and row['Exam_Score'] > 4:  # High motivation and above-average Exam_Score
+        recommendations["Resources"] = "Study Groups and Peer Learning"
+    else:
+        recommendations["Resources"] = "Self-Study Materials"
+
+    return recommendations
+
+
+
+
+# Apply the logic to create new recommendation features
+engineered_data_with_learning_path['Course_Recommendation'] = engineered_data_with_learning_path.apply(
+    lambda row: recommend_learning_path(row)["Courses"], axis=1
+)
+engineered_data_with_learning_path['Study_Schedule'] = engineered_data_with_learning_path.apply(
+    lambda row: recommend_learning_path(row)["Study_Schedule"], axis=1
+)
+engineered_data_with_learning_path['Recommended_Resources'] = engineered_data_with_learning_path.apply(
+    lambda row: recommend_learning_path(row)["Resources"], axis=1
+)
+
+
+# Save the updated dataset(dataset with outputs):
+
+learning_path_dataset_path = os.path.join(os.getcwd(), 'feature_engineered_with_learning_path.csv')
+engineered_data_with_learning_path.to_csv(learning_path_dataset_path, index=False)
+
+print(f"Dataset with 'Learning Path Recommendation' saved to: {learning_path_dataset_path}")
+
+
+
+# Encoding Categorical o/p-features:
+
+def encode_categorical_outputs(dataframe, columns):
+    """
+    Encodes categorical output features using appropriate encoding methods.
+
+    Args:
+        dataframe: The DataFrame containing the data.
+        columns: A dictionary with column names as keys and encoding type as values.
+                 Options for encoding type: 'ordinal' or 'onehot'.
+
+    Returns:
+        Encoded DataFrame with added one-hot columns if applicable.
+    """
+    for column, encoding_type in columns.items():
+        if encoding_type == 'ordinal':
+            # Apply ordinal encoding
+            le = LabelEncoder()
+            dataframe[column] = le.fit_transform(dataframe[column])
+        elif encoding_type == 'onehot':
+            # Apply one-hot encoding
+            one_hot = pd.get_dummies(dataframe[column], prefix=column, drop_first=True)
+            dataframe = pd.concat([dataframe, one_hot], axis=1)
+            dataframe = dataframe.drop(columns=[column], errors='ignore')
+    return dataframe
+
+# Categorical Output Features and their Encoding Type
+categorical_outputs = {
+    "Skill_Gap_Analysis": "ordinal",  # "Significant Gap", "Moderate Gap", "No Gap"
+    "Engagement_Prediction": "ordinal",  # "High Risk", "Moderate Risk", "Low Risk"
+    "Course_Recommendation": "ordinal",  # "Advanced Courses", etc.
+    "Study_Schedule": "ordinal",  # "Intensive Schedule", etc.
+    "Recommended_Resources": "onehot"  # "Additional Tutoring and Online Resources", etc.
+}
+
+
+# Apply encoding to the dataset
+encoded_data = encode_categorical_outputs(engineered_data_with_learning_path, categorical_outputs)
+
+# Save the encoded dataset
+encoded_dataset_path = os.path.join(os.getcwd(), 'encoded_feature_engineered_data.csv')
+encoded_data.to_csv(encoded_dataset_path, index=False)
+
+print(f"Encoded dataset saved to: {encoded_dataset_path}")
+
+
+# Converting both one-hot columns from 'Bool' to 'Int':
+
+encoded_data['Recommended_Resources_Self-Study Materials'] = encoded_data['Recommended_Resources_Self-Study Materials'].astype(int)
+encoded_data['Recommended_Resources_Study Groups and Peer Learning'] = encoded_data['Recommended_Resources_Study Groups and Peer Learning'].astype(int)
+
+
+''' At last we should have only 2 datasets i.e., initial dataset and final dataset with o/p features. '''
+
+
+# STEP-3(Data Splitting and Model Selection/Training):
+
+# A. Data Splitting:
+
+'''
+# Step 1: Convert all columns to numerical types where applicable
+for column in encoded_data.columns:
+    if encoded_data[column].dtype == 'object':
+        try:
+            encoded_data[column] = pd.to_numeric(encoded_data[column], errors='coerce')
+        except Exception as e:
+            print(f"Error converting column '{column}': {e}")
+
+# Step 2: Handle missing values in encoded_data after conversion
+encoded_data = encoded_data.fillna(encoded_data.mean())
+'''
+
+# Define output features
+output_features = [
+    'Early_Dropout_Risk',
+    'Skill_Gap_Analysis',
+    'Study_Group',
+    'Engagement_Prediction',
+    'Course_Recommendation',
+    'Study_Schedule',
+    'Recommended_Resources_Self-Study Materials',
+    'Recommended_Resources_Study Groups and Peer Learning'
+]
+
+
+# Mapping dictionary for output features(Added this section to generate results in more human understanding way instead of numbers):
+output_mappings = {
+    'Early_Dropout_Risk': {0: 'Low Risk', 0.5: 'Medium Risk', 1: 'High Risk'},
+    'Skill_Gap_Analysis': {0: 'No Gap', 1: 'Moderate Gap', 2: 'Significant Gap'},
+    'Study_Group': {0: 'Group A', 1: 'Group B', 2: 'Group C'},  # Example groups
+    'Engagement_Prediction': {0: 'Low Engagement', 1: 'Moderate Engagement', 2: 'High Engagement'},
+    'Course_Recommendation': {0: 'Foundational Courses', 1: 'Intermediate Courses', 2: 'Advanced Courses'},
+    'Study_Schedule': {0: 'Light Schedule', 1: 'Regular Schedule', 2: 'Intensive Schedule'},
+    'Recommended_Resources_Self-Study Materials': {0: 'No', 1: 'Yes'},
+    'Recommended_Resources_Study Groups and Peer Learning': {0: 'No', 1: 'Yes'}
+}
+
+def map_predictions_to_text(predictions, mappings):
+    """
+    Converts numeric predictions to their corresponding textual descriptions.
+
+    Args:
+        predictions: Array of predictions from the model.
+        mappings: Dictionary containing mappings for each output feature.
+
+    Returns:
+        Dict of mapped predictions.
+    """
+    mapped_results = {}
+    for feature, mapping in mappings.items():
+        if feature in predictions.keys():
+            mapped_results[feature] = mapping.get(predictions[feature], "Unknown")
+    return mapped_results
+
+
+
+# Separate input features (X) and output features (y)
+X = encoded_data.drop(columns=output_features, errors='ignore')
+y = encoded_data[output_features]
+
+# Check if there are still NaN values in y
+y = y.fillna(y.mean())
+
+
+# Feaure Selection(Selecting Best Features for Optimization):
+
+# Feature Selection: Using Feature Importance from Random Forest
+
+def select_important_features(X, y, n_features=10):
+    """
+    Select top n_features based on feature importance using RandomForestClassifier.
+
+    Args:
+        X (pd.DataFrame): Input features.
+        y (pd.DataFrame): Output targets (can be single or multiple).
+        n_features (int): Number of top features to select.
+
+    Returns:
+        list: List of selected important features.
+    """
+    # For multi-output targets, use first target column for simplicity
+    first_target = y.iloc[:, 0]
+
+
+    # Plot the distribution of first_target
+    plt.hist(first_target, bins=20, edgecolor='k', alpha=0.7)
+    plt.title('Distribution of first_target')
+    plt.xlabel('Values')
+    plt.ylabel('Frequency')
+    plt.show()
+
+    # Print basic statistics to understand the range and uniqueness
+    print("Statistics of first_target:")
+    print(first_target.describe())
+    print("Number of unique values in first_target:", first_target.unique())
+
+
+    # Convert continuous target into discrete bins if needed
+    if first_target.dtypes in ['float64', 'float32']:
+        first_target = pd.qcut(first_target, q=3, labels=False, duplicates = 'drop')  # Discretize into 3 quantile-based bins
+
+
+    # Train Random Forest
+    rf = RandomForestClassifier(random_state=42)
+    rf.fit(X, first_target)
+
+    # Get feature importances
+    importances = rf.feature_importances_
+    feature_importance = pd.DataFrame({'Feature': X.columns, 'Importance': importances})
+    feature_importance = feature_importance.sort_values(by='Importance', ascending=False)
+
+    # Select top n_features
+    selected_features = feature_importance.head(n_features)['Feature'].tolist()
+    return selected_features
+
+# Select important features
+important_features = select_important_features(X, y, n_features=10)
+print(f"Selected Important Features: {important_features}")
+
+# Update X to use only important features
+X = X[important_features]
+
+
+# Save selected important features
+selected_features_path = os.path.join(os.getcwd(), 'selected_features.pkl')
+joblib.dump(important_features, selected_features_path)
+print(f"Selected features saved to: {selected_features_path}")
+files.download('selected_features.pkl')
+
+
+'''
+Condition to check if there are still NaN values in the target variables.
+
+if y.isnull().values.any():
+    print("There are still NaN values in the target variables.")
+    print(y)
+else:
+    print("No NaN values in the target variables.")
+'''
+
+
+# Ensure all target variables are treated as categorical
+
+for column in y.columns:
+    if y[column].dtype != 'int':
+        y[column] = y[column].apply(lambda x: round(x)).astype(int)
+
+# Verify the number of samples in X and y
+print(f"Number of samples in X: {X.shape[0]}")
+print(f"Number of samples in y: {y.shape[0]}")
+print(y)
+# Ensure that X and y have the same number of samples
+if X.shape[0] != y.shape[0]:
+    print(f"Mismatch in number of samples: X has {X.shape[0]} samples, y has {y.shape[0]} samples.")
+else:
+    print(f"Number of samples in X and y are consistent: {X.shape[0]} samples.")
+
+
+# Split the data into training, validation, and test sets
+X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42)  # 70% training, 30% temp
+X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)  # 15% validation, 15% test
+
+
+# If y_train contains non-numeric values (e.g., strings, multi-output features not encoded as numbers), this can cause failures during training or scoring.
+y_train = y_train.apply(LabelEncoder().fit_transform)
+
+# If the input X_train or y_train contains NaN or infinite values, the model fitting will fail.
+# Replace NaN and infinite values with mean
+X_train = X_train.replace([np.inf, -np.inf], np.nan).fillna(X_train.mean())
+
+
+
+# Display split information
+print(f"Training Set Features Shape: {X_train.shape}")
+print(f"Training Set Targets Shape: {y_train.shape}")
+print(f"Validation Set Features Shape: {X_val.shape}")
+print(f"Validation Set Targets Shape: {y_val.shape}")
+print(f"Test Set Features Shape: {X_test.shape}")
+print(f"Test Set Targets Shape: {y_test.shape}")
+
+
+# B. Model Selection and Evaluation:
+
+
+models = {
+        # "Random Forest": RandomForestClassifier(random_state=42),
+        "Random Forest": RandomForestClassifier(class_weight='balanced', random_state=42),
+        # "XGBoost": XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
+    }
+
+
+
+
+'''
+Random Forest:
+    ValueError: multiclass-multioutput is not supported
+    getting this error while using below function to train because of multivalues, so to resolve it we utilized "MultipOutputClassifier"(from sklearn.multioutput import MultiOutputClassifier)
+    def train_and_evaluate_model(X_train, y_train, X_val, y_val):
+        results = {}
+        for model_name, model in models.items():
+            print(f"\nTraining {model_name}...")
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_val)
+            print(f"Classification Report for {model_name}:")
+            print(classification_report(y_val, y_pred))
+            results[model_name] = accuracy_score(y_val, y_pred)
+        return results
+'''
+
+# Define a function for model training and evaluation:
+
+def train_and_evaluate_model(X_train, y_train, X_val, y_val):
+        results = {}
+        for model_name, base_model in models.items():
+            print(f"\nTraining {model_name}...")
+            # Use MultiOutputClassifier to handle multioutput classification
+            model = MultiOutputClassifier(base_model)
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_val)
+            print(f"Classification Report for {model_name}:")
+            for i, column in enumerate(y_val.columns):
+                print(f"Target: {column}")
+                print(classification_report(y_val[column], y_pred[:, i]))
+            # Calculate overall accuracy
+            overall_accuracy = np.mean([accuracy_score(y_val.iloc[:, i], y_pred[:, i]) for i in range(y_val.shape[1])]) * 100
+            results[model_name] = overall_accuracy
+        return results
+
+
+
+
+
+# Train and evaluate models
+model_results = train_and_evaluate_model(X_train, y_train, X_val, y_val)
+print("\nModel Evaluation Results:")
+print(model_results)
+
+# Choosing the best model for final testing
+best_model_name = max(model_results, key=model_results.get)
+print(f"\nBest Model: {best_model_name}")
+
+# Train the best model on combined training and validation data, and evaluate on the test set
+best_model = MultiOutputClassifier(models[best_model_name])
+best_model.fit(pd.concat([X_train, X_val]), pd.concat([y_train, y_val]))
+
+# Generate predictions
+y_test_pred = best_model.predict(X_test)
+y_test_pred_df = pd.DataFrame(y_test_pred, columns=output_features)
+
+# Map numeric predictions to descriptive text
+mapped_predictions = {}
+for column in y_test_pred_df.columns:
+    mapped_predictions[column] = [
+        output_mappings[column].get(value, "Unknown") for value in y_test_pred_df[column]
+    ]
+
+# Display the mapped predictions
+print(f"\nMapped Test Set Predictions for {best_model_name}:")
+for feature, values in mapped_predictions.items():
+    print(f"{feature}: {values}")
+
+# Generate classification reports for each target
+print(f"\nClassification Report for {best_model_name}:")
+for idx, column in enumerate(output_features):
+    print(f"\nTarget: {column}")
+    print(classification_report(y_test.iloc[:, idx], y_test_pred[:, idx]))
+
+'''
+y_test_pred = best_model.predict(X_test)
+print(f"\nTest Set Performance for {best_model_name}:")
+'''
+
+
+# After replacing the prediction section with mapping_prediction I'm getting this error(ValueError: multiclass-multioutput is not supported).
+
+
+
+
+# STEP - 4(Hyperparameter Tunning):
+
+
+''' what is n_jobs ? '''
+
+# Grid Search for a Single Target for each Iteration.
+for i in output_features:
+  target_col = i  # Replace with an output feature name
+  single_y_train = y_train[target_col]
+
+# Grid Search for single target
+  rf_grid_search_single = GridSearchCV(
+    estimator=RandomForestClassifier(random_state=42),
+    param_grid={
+        'n_estimators': [50, 100],
+        'max_depth': [None, 10],
+    },
+    cv=3,
+    scoring='accuracy',
+    verbose=2,
+    n_jobs=1
+  )
+
+  rf_grid_search_single.fit(X_train, single_y_train)
+  print(f"Best Parameters for {target_col}: {rf_grid_search_single.best_params_}")
+  print(f"Best Score for {target_col}: {rf_grid_search_single.best_score_}")
+
+
+
+# STEP - 5(Content-Based Recommendation System):
+
+# Features to calculate similarity
+recommendation_features = [
+    'Early_Dropout_Risk',
+    'Skill_Gap_Analysis',
+    'Study_Group',
+    'Engagement_Prediction'
+]
+# Normalize the feature data for similarity computation
+normalized_data = encoded_data.copy()
+scaler = StandardScaler()
+normalized_data[recommendation_features] = scaler.fit_transform(encoded_data[recommendation_features])
+
+# Compute cosine similarity between students based on the selected features
+similarity_matrix = cosine_similarity(normalized_data[recommendation_features])
+
+# Function to recommend learning paths dynamically based on new student input
+def recommend_content_based_dynamic(new_student_features, top_n=5):
+    """
+    Recommend learning paths dynamically based on new student features.
+
+    Args:
+        new_student_features (pd.Series): Features of the new student.
+        top_n (int): Number of recommendations to return.
+
+    Returns:
+        dict: A dictionary of recommended sub-features.
+    """
+    # Compute cosine similarity with the new student
+    new_student_scaled = scaler.transform(new_student_features.values.reshape(1, -1))
+    similarity_scores = cosine_similarity(new_student_scaled, normalized_data[recommendation_features])[0]
+
+    # Get indices of the most similar students
+    similar_students = similarity_scores.argsort()[::-1][:top_n]
+
+    # Extract recommendations from the similar students
+    recommendations = {
+        'Course_Recommendation': encoded_data.iloc[similar_students]['Course_Recommendation'].tolist(),
+        'Study_Schedule': encoded_data.iloc[similar_students]['Study_Schedule'].tolist(),
+        'Recommended_Resources': encoded_data.iloc[similar_students][[
+            'Recommended_Resources_Self-Study Materials',
+            'Recommended_Resources_Study Groups and Peer Learning'
+        ]].idxmax(axis=1).tolist()
+    }
+    return recommendations
+
+# Example: Recommend for a new student
+new_student_features = pd.Series(data=[0.5, 1, -1.2, 0.8], index=recommendation_features)  # Example input
+recommendations_dynamic = recommend_content_based_dynamic(new_student_features=new_student_features, top_n=5)
+
+# Display recommendations
+print(f"\nDynamic Content-Based Recommendations:")
+print("Recommended Courses:", recommendations_dynamic['Course_Recommendation'])
+print("Recommended Study Schedules:", recommendations_dynamic['Study_Schedule'])
+print("Recommended Resources:", recommendations_dynamic['Recommended_Resources'])   # As we divided the 'Recommended_Resources' column into 2 cols, so do we change here anything.
+
+
+
+# Download the Pickle File of ML Model for Deployment:
+
+
+# Save the model
+joblib.dump(best_model, 'student_performance_model.pkl')
+
+# Load the model (for testing)
+loaded_model = joblib.load('student_performance_model.pkl')
+
+
+
+files.download('student_performance_model.pkl')
+
+
+
+
+# STEP - 6(Deployment using Html,CSS and JS):
+
+# Code is written in Vscode(local machine).
+
+# Describe about all o/p and feature engineered features clealy in the document that you'll upload in portfolio and also in 'linkedin post' if it's ok to describe.
+
