@@ -3,14 +3,22 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
+import bz2file as bz2
+import pickle
 
+# Function to decompress and load a file
+def decompress_pickle(file):
+    data = bz2.BZ2File(file, 'rb')
+    data = pickle.load(data)
+    return data
 
 
 # Load the trained model, selected features, and dataset
 @st.cache_resource
 def load_model_and_features():
     try:
-        model = joblib.load('student_performance_model.pkl')  # Adjust path if needed
+        # model = joblib.load('student_performance_model.pkl')  # Adjust path if needed
+        model = decompress_pickle('student_performance_model.pbz2')
         selected_features = joblib.load('selected_features.pkl')  # Load selected features
         encoded_data = pd.read_csv('encoded_feature_engineered_data.csv')  # Load encoded dataset for recommendations
         return model, selected_features, encoded_data
