@@ -1,12 +1,10 @@
 streamlit
-librosa
+joblib
 numpy
 pandas
-joblib
 scikit-learn
+bz2file
+scikit-surprise
 altair
 xgboost
-matplotlib
-scikit-surprise
-pickle
-bz2file
+librosa
